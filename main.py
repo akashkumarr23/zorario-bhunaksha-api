@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("bhunaksha")
 
 # ─── Configuration ────────────────────────────────────────────────
-BASE_URL = os.getenv("BHUNAKSHA_BASE", "https://bhunaksha.bihar.gov.in/bhunaksha")
+BASE_URL = os.getenv("BHUNAKSHA_BASE", "https://bhunaksha.bihar.gov.in")
 STATE_CODE = "10"          # Bihar state code in NIC Bhunaksha
 
 # Supabase (optional — for caching)
@@ -161,22 +161,97 @@ async def health():
     return {"status": "ok", "service": "bhunaksha-scraper", "state": "Bihar"}
 
 
+BIHAR_38_DISTRICTS = [
+    {"code": "07", "name": "Araria", "name_hindi": "अररिया"},
+    {"code": "38", "name": "Arwal", "name_hindi": "अरवल"},
+    {"code": "34", "name": "Aurangabad", "name_hindi": "औरंगाबाद"},
+    {"code": "23", "name": "Banka", "name_hindi": "बांका"},
+    {"code": "20", "name": "Begusarai", "name_hindi": "बेगूसराय"},
+    {"code": "22", "name": "Bhagalpur", "name_hindi": "भागलपुर"},
+    {"code": "29", "name": "Bhojpur", "name_hindi": "भोजपुर"},
+    {"code": "30", "name": "Buxar", "name_hindi": "बक्सर"},
+    {"code": "13", "name": "Darbhanga", "name_hindi": "दरभंगा"},
+    {"code": "35", "name": "Gaya", "name_hindi": "गया"},
+    {"code": "15", "name": "Gopalganj", "name_hindi": "गोपालगंज"},
+    {"code": "37", "name": "Jamui", "name_hindi": "जमुई"},
+    {"code": "33", "name": "Jehanabad", "name_hindi": "जहानाबाद"},
+    {"code": "31", "name": "Kaimur", "name_hindi": "कैमूर"},
+    {"code": "10", "name": "Katihar", "name_hindi": "कटिहार"},
+    {"code": "21", "name": "Khagaria", "name_hindi": "खगड़िया"},
+    {"code": "08", "name": "Kishanganj", "name_hindi": "किशनगंज"},
+    {"code": "25", "name": "Lakhisarai", "name_hindi": "लखीसराय"},
+    {"code": "11", "name": "Madhepura", "name_hindi": "मधेपुरा"},
+    {"code": "05", "name": "Madhubani", "name_hindi": "मधुबनी"},
+    {"code": "24", "name": "Munger", "name_hindi": "मुंगेर"},
+    {"code": "14", "name": "Muzaffarpur", "name_hindi": "मुजफ्फरपुर"},
+    {"code": "01", "name": "Nalanda", "name_hindi": "नालंदा"},
+    {"code": "36", "name": "Nawada", "name_hindi": "नवादा"},
+    {"code": "27", "name": "Pashchim Champaran", "name_hindi": "पश्चिम चम्पारण"},
+    {"code": "28", "name": "Patna", "name_hindi": "पटना"},
+    {"code": "02", "name": "Purbi Champaran", "name_hindi": "पूर्वी चम्पारण"},
+    {"code": "09", "name": "Purnia", "name_hindi": "पूर्णिया"},
+    {"code": "32", "name": "Rohtas", "name_hindi": "रोहतास"},
+    {"code": "12", "name": "Saharsa", "name_hindi": "सहरसा"},
+    {"code": "19", "name": "Samastipur", "name_hindi": "समस्तीपुर"},
+    {"code": "17", "name": "Saran", "name_hindi": "सारण"},
+    {"code": "26", "name": "Sheikhpura", "name_hindi": "शेखपुरा"},
+    {"code": "03", "name": "Sheohar", "name_hindi": "शिवहर"},
+    {"code": "04", "name": "Sitamarhi", "name_hindi": "सीतामढ़ी"},
+    {"code": "16", "name": "Siwan", "name_hindi": "सीवान"},
+    {"code": "06", "name": "Supaul", "name_hindi": "सुपौल"},
+    {"code": "18", "name": "Vaishali", "name_hindi": "वैशाली"},
+]
+
 @app.get("/districts")
 async def get_districts():
-    """Return all Bihar districts from Bhunaksha portal."""
-    cache_key = "districts"
-    cached = cache_get(cache_key)
-    if cached:
-        return cached
+    """Return all 38 Bihar districts with official NIC codes."""
+    return {"districts": BIHAR_38_DISTRICTS}
 
-    raw = await bhunaksha_post(
-        "DistrictList/getDistrict",
-        {"state": STATE_CODE},
-    )
 
-    result = {"districts": _normalize_list(raw, "district")}
-    cache_set(cache_key, result)
-    return result
+@app.get("/cadastral-map")
+async def get_cadastral_map(
+    district_code: str = Query(..., description="2-digit district code"),
+    circle_code: str = Query("01"),
+    mauza_code: str = Query("0058"),
+    subdiv_code: str = Query("01"),
+    sv_type: str = Query("SS"),
+    sheet_no: str = Query("00"),
+):
+    """
+    Fetch authentic Bihar Government GeoServer WMS Cadastral Map URL
+    and bounding box for given village.
+    """
+    levels = f"{district_code},{subdiv_code},{circle_code},{mauza_code},{sv_type},00,{sheet_no},"
+    try:
+        url = f"{BASE_URL}/rest/MapInfo/getVVVVExtentGeoref"
+        resp = await _client.post(url, data={"state": STATE_CODE, "gisLevels": levels, "srs": "0"})
+        if resp.status_code == 200:
+            data = resp.json()
+            gis_code = data.get("gisCode")
+            epsg = data.get("epsg", "EPSG:32645")
+            xmin, ymin = data.get("xmin"), data.get("ymin")
+            xmax, ymax = data.get("xmax"), data.get("ymax")
+
+            if gis_code and xmin and ymin and xmax and ymax:
+                wms_url = (
+                    f"{BASE_URL}/WMS?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
+                    f"&LAYERS=VILLAGE_MAP&state=10&gis_code={gis_code}&STYLES=VILLAGE_MAP"
+                    f"&SRS={epsg}&BBOX={xmin},{ymin},{xmax},{ymax}&WIDTH=1200&HEIGHT=900&FORMAT=image/png"
+                )
+                return {
+                    "success": True,
+                    "gis_code": gis_code,
+                    "wms_url": wms_url,
+                    "attribution": data.get("attribution", ""),
+                    "bbox": [xmin, ymin, xmax, ymax],
+                }
+    except Exception as e:
+        log.error(f"Error fetching cadastral map: {e}")
+
+    return {
+        "success": False,
+        "detail": "Could not resolve extent from Bihar GeoServer",
+    }
 
 
 @app.get("/circles")
